@@ -1,0 +1,166 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [develop]
+
+env:
+  DOCKER_IMAGE: vlauthor/vm-user-ms
+  CONTAINER_NAME: vm-user-ms-1
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      node-version: ${{ steps.set-node.outputs.version }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set Node.js version
+        id: set-node
+        run: echo "version=$(jq -r '.engines.node' package.json)" >> $GITHUB_OUTPUT
+
+  tests:
+    runs-on: ubuntu-latest
+    needs: setup
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ needs.setup.outputs.node-version }}
+
+      - name: Cache dependencies
+        uses: actions/cache@v3
+        with:
+          path: node_modules
+          key: deps-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+
+      - name: Install dependencies
+        run: npm ci --prefer-offline
+
+      - name: Run Lint
+        run: npm run lint
+
+      - name: Run tests
+        run: npm test
+
+  build:
+    runs-on: ubuntu-latest
+    needs: [setup, tests]
+    outputs:
+      image-tag: ${{ steps.tag.outputs.value }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0s
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ needs.setup.outputs.node-version }}
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Get commit SHA
+        id: sha
+        run: echo "sha=${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
+
+      - name: Set image tag
+        id: tag
+        run: echo "value=sha-${{ steps.sha.outputs.sha }}" >> $GITHUB_OUTPUT
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.DOCKER_IMAGE }}:${{ steps.tag.outputs.value }}
+            ${{ env.DOCKER_IMAGE }}:latest
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build
+    environment:
+      name: production
+      url: https://github.com
+    steps:
+      - name: Deploy to server
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USERNAME }}
+          password: ${{ secrets.SSH_PASSWORD }}
+          port: ${{ secrets.SSH_PORT || 22 }}
+          script: |
+            set -e  # Немедленный выход при ошибке
+            set -x  # Подробный вывод команд
+
+            # 1. Очистка Docker системы
+            echo "🧹 [1/7] Очистка Docker системы..."
+            docker system prune -a -f --volumes || true
+            docker container prune -f || true
+            docker image prune -a -f || true
+
+            # 2. Очистка системных ресурсов
+            echo "🗑️ [2/7] Очистка системных ресурсов..."
+            sudo journalctl --vacuum-size=200M || true
+            sudo find /var/log -type f -name "*.log" -delete || true
+            sudo apt-get clean || true
+            sudo apt-get autoclean || true
+            echo "💾 Проверка свободного места:"
+            df -h | grep -v snap | awk '{print $4 " свободно в " $6}'
+
+            # 3. Остановка текущего контейнера
+            echo "🛑 [3/7] Остановка текущего контейнера..."
+            docker stop "${{ env.CONTAINER_NAME }}" || true
+            docker rm "${{ env.CONTAINER_NAME }}" || true
+
+            # 4. Освобождение порта 4040
+            echo "🔓 [4/7] Освобождение порта 4040..."
+            docker ps -q --filter "publish=4040" | xargs -r docker stop | xargs -r docker rm
+            sudo lsof -ti:4040 | xargs -r sudo kill -9 || true
+            sleep 5
+            echo "🔍 Проверка занятости порта 4040:"
+            sudo ss -tulpn | grep ':4040' || echo "✅ Порт 4040 свободен"
+
+            # 5. Проверка порта
+            echo "🔎 [5/7] Проверка доступности порта..."
+            if sudo lsof -i :4040; then
+              echo "❌ ОШИБКА: Порт 4040 все еще занят!"
+              exit 1
+            else
+              echo "✅ Порт 4040 успешно освобожден"
+            fi
+
+            # 6. Загрузка нового образа
+            echo "⬇️ [6/7] Загрузка нового Docker-образа..."
+            docker pull "${{ env.DOCKER_IMAGE }}:${{ needs.build.outputs.image-tag }}"
+            echo "✅ Образ успешно загружен!"
+
+            # 7. Запуск нового контейнера
+            echo "🚀 [7/7] Запуск нового контейнера..."
+            docker run -d \
+              --name "${{ env.CONTAINER_NAME }}" \
+              -p 4040:4040 \
+              -e NODE_ENV=production \
+              -v /app/logs:/var/log/app \
+              --restart=unless-stopped \
+              "${{ env.DOCKER_IMAGE }}:${{ needs.build.outputs.image-tag }}"
+
+            # 8. Проверка запуска
+            echo "🔍 Проверка состояния контейнера..."
+            docker ps --filter "name=${{ env.CONTAINER_NAME }}" --format "table {{.ID}}\t{{.Names}}\t{{.Status}}"
+
+            # 9. Проверка логов
+            echo "📝 Последние логи контейнера:"
+            docker logs "${{ env.CONTAINER_NAME }}" --tail 20 || echo "⚠️ Логи еще недоступны"
+
+            echo "🎉 Деплой успешно завершен! Время: $(date)"

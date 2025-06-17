@@ -1,0 +1,8 @@
+version: '3.8'
+
+services:
+  app:
+    build: .
+    container_name: vm-user-ms
+    ports:
+      - '4040:4040'

@@ -1,0 +1,95 @@
+syntax = "proto3";
+
+package database;
+
+service DatabaseService {
+  rpc getUserByLogin (LoginRequest) returns (UserOrFalse);
+  rpc getUserByPhone (PhoneRequest) returns (UserOrFalse);
+  rpc getUserInfo (IdRequest) returns (UserServiceResponse);
+  rpc updateUserInfo (UpdateUserInfoRequest) returns (UserServiceResponse);
+}
+
+// ==== Requests & DTOs ====
+message LoginRequest {
+  string login = 1;
+}
+
+message PhoneRequest {
+  string phone = 1;
+}
+
+message IdRequest {
+  int32 id = 1;
+}
+
+message UpdateUserInfoRequest {
+  int32 id = 1;
+  PutUserDTO data = 2;
+}
+
+// ==== Return types ====
+
+message User {
+  uint32 id = 1;
+  string email = 2;
+  string lastName = 3;
+  string firstName = 4;
+  string phone = 5;
+  string password = 6;
+  string registerDate = 7;
+}
+message Company {
+  string name = 1;
+}
+
+message Role {
+  string name = 1;
+}
+
+message UserCompany {
+  Company company = 1;
+  Role role = 2;
+}
+
+message UserInfoResponse {
+  string firstName = 1;
+  string lastName = 2;
+  string registerDate = 3;
+  string phone = 4;
+  string email = 5;
+  repeated UserCompany userCompany = 6;
+}
+
+// ==== DTOs ====
+
+message PutUserDTO {
+  string email = 1;
+  string firstName = 2;
+  string lastName = 3;
+  string phone = 4;
+}
+
+message ErrorResponse { int32 statusCode = 1; string message = 2; string error = 3; }
+
+// ==== Wrappers ====
+
+message UserOrFalse {
+  oneof result {
+    User user = 1;
+    bool notFound = 2;
+  }
+}
+
+message UserServiceResponse {
+  oneof result {
+    UserInfoResponse seccses = 1;
+    ErrorResponse error = 2;
+  }
+}
+
+message UserInfoOrFalse {
+  oneof result {
+    UserInfoResponse user = 1;
+    bool notFound = 2;
+  }
+}
